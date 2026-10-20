@@ -1,6 +1,6 @@
 #!/bin/bash -e
 
-BUNDLE_VERSION="20251008"
+BUNDLE_VERSION="20261016"
 DEST="/run/media/anitschk/CIRCUITPY"
 
 ZIP_BASE_NAME="adafruit-circuitpython-bundle-10.x-mpy-$BUNDLE_VERSION"

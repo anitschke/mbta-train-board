@@ -33,7 +33,7 @@ To put the MatrixPortal S3 into bootloader mode so that the `MATRXS3BOOT` drive 
      * "Install CircuitPython 10.0.0 UF2 Only" (or drag and drop the `.uf2` file onto the `MATRXS3BOOT` drive)
      * Continue following install instructions
 
-Currently using `adafruit-circuitpython-matrixportal_m4-en_US-10.0.0`
+Currently using `adafruit-circuitpython-matrixportal_s3-en_US-10.3.1`
 
 ### Install Adafruit Library
 
