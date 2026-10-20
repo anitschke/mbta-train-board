@@ -16,11 +16,22 @@ Adafruit makes it super easy to create an internet connected LED board like this
 
 ### Flash with CircuitPython
 
-The [instructions on setting up the Matrix Portal S3](https://learn.adafruit.com/adafruit-matrixportal-s3/install-circuitpython) that state you can just drag and drop the circuit python `.u2` file onto the `MATRXS3BOOT` drive don't seem to work correctly. However I was able to install it using the web installer on
-* https://circuitpython.org/board/adafruit_matrixportal_s3/
-* "Open Installer"
-* "Install CircuitPython 10.0.0 UF2 Only"
-* Continue following install instructions
+To put the MatrixPortal S3 into bootloader mode so that the `MATRXS3BOOT` drive appears:
+1. **Use a data-capable USB cable:** Make sure you are using a real data USB cable and not a charge-only cable. If you are having issues with the process or want to test if you have the right cable, plug in the board and check if the serial device appears:
+   ```sh
+   ls /dev/ttyACM*
+   ```
+   If `/dev/ttyACM0` (or similar) shows up, your cable supports data.
+2. **Enter UF2 Bootloader mode:** Double-click the physical **Reset** button on the board.
+   * You might not get the timing correct the first time—you may need to try the double-click a little faster or slower.
+   * When successful, the onboard NeoPixel status LED will turn **green**, and the `MATRXS3BOOT` drive will appear on your computer.
+   * If you have any issues, refer to the [Adafruit MatrixPortal S3 Install CircuitPython instructions](https://learn.adafruit.com/adafruit-matrixportal-s3/install-circuitpython).
+3. **Install CircuitPython:**
+   * You can install it using the web installer or by copying the `.uf2` file directly:
+     * https://circuitpython.org/board/adafruit_matrixportal_s3/
+     * "Open Installer"
+     * "Install CircuitPython 10.0.0 UF2 Only" (or drag and drop the `.uf2` file onto the `MATRXS3BOOT` drive)
+     * Continue following install instructions
 
 Currently using `adafruit-circuitpython-matrixportal_m4-en_US-10.0.0`
 
