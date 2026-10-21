@@ -2,62 +2,28 @@ import gc
 import time
 from collections_extra import LimitedSizeOrderedSet, LimitedSizeOrderedDict
 
-# DATA_SOURCE is the URL for the MBTA API that we query to get data about
-# trains.
-# 
-# There is very good documentation for this API here
+# The MBTA V3 API documentation can be found at:
 # https://www.mbta.com/developers/v3-api
 # 
-# In general what we are doing is querying for a schedule of when all trains are
-# arriving at the Franklin MBTA station. This stop ID "place-FB-0275 " was
-# obtained by looking at
-# https://api-v3.mbta.com/stops?filter%5Broute%5D=CR-Franklin
+# In general, we query for a schedule of trains arriving/departing at a given
+# MBTA station stop ID (e.g. "place-FB-0275" for Franklin / Dean College).
+#
+# We also include any predictions associated with a given schedule. This allows
+# us to use real-time predictions when available, while falling back to scheduled
+# times for trains further out that don't have predictions yet.
 # 
-# We also ask it to include any predictions that are associated with a given
-# schedule. This allows us to use a more accurate prediction when possible but
-# otherwise fallback to a the less accurate schedule time for trains that are a
-# ways off and don't have a predation yet.
+# The "fields" query parameters use sparse fieldsets to only request the data
+# we need. See https://www.mbta.com/developers/v3-api/best-practices#sparse-fieldsets
 # 
-# The "fields" query parameters is a sparce field set that we use to request
-# what specific data we are interested in. It means that we get less data back
-# that we need to process. See
-# https://www.mbta.com/developers/v3-api/best-practices#sparse-fieldsets
-# 
-# One main disadvantage to this approach is the
-# https://api-v3.mbta.com/schedules API will by default give us the schedule for
-# ALL trains for today, even ones that have passed by. There are some "filter"
-# options to filter by date and by time but it seems that this needs to be
-# specified as an absolute date / time which means we would need to deal with
-# updating the URL with the current date/time every time we make a request.
-# There is also some tricky logic with how the consider times due to the
-# "service date" of trains ( see
-# https://api-v3.mbta.com/docs/swagger/index.html#/Schedule/ApiWeb_ScheduleController_index
-# ). So for now we will just request ALL the trains for today and filter them
-# when we get the data back. 
-DATA_SOURCE="https://api-v3.mbta.com/schedules?" \
-  "filter[stop]=place-FB-0275&" \
-  "filter[route]=CR-Franklin&" \
-  "sort=arrival_time&" \
-  "include=prediction&" \
-  "fields[schedule]=arrival_time,departure_time,direction_id&" \
-  "fields[prediction]=arrival_time,departure_time,direction_id" 
+# The schedules API returns schedules for the full service day, so we filter
+# past trains upon receipt.
+DEFAULT_STOP_ID = "place-FB-0275" 
 
 # Direction Enum
 # 
-# WARNING: this enum is specific to the Franklin MBTA station. From
-# https://api-v3.mbta.com/docs/swagger/index.html
-# 
-#   direction_id    integer Direction in which trip is traveling: 0 or 1.
-#   
-#   The meaning of direction_id varies based on the route. You can
-#   programmatically get the direction names from /routes
-#   /data/{index}/attributes/direction_names or /routes/{id}
-#   /data/attributes/direction_names.
-#
-# Since we are setting this up for the Franklin line we will just hard code this
-# for now. Looking at https://api-v3.mbta.com/routes/CR-Franklin we can see:
-# 
-#  "direction_names": [ "Outbound", "Inbound" ],
+# In the MBTA V3 API:
+#   direction_id: integer direction in which trip is traveling: 0 or 1.
+#   Typically 0 = Outbound, 1 = Inbound.
 class Direction:
     OUT_BOUND = 0
     IN_BOUND = 1
@@ -69,31 +35,27 @@ def direction_str(direction):
         return "IN"
     return "UNKNOWN"
 
-# TrainArrival represents an arrival at the Children Museum of Franklin.
+# TrainArrival represents a train arrival/departure at a station.
 # 
-# WARNING: schedule_id is not globally unique, as far as I can tell it is only
-# unique for a given day. It IS reused from dat to day. See
-# TrainPredictor.clear_cache for details.
-# 
-# std_dev is the standard deviation of arrival times in this direction.
+# WARNING: schedule_id is not globally unique; it is reused from day to day.
+# See TrainPredictor.clear_cache for details.
 class TrainArrival:
-    def __init__(self, schedule_id, time, direction, std_dev):
+    def __init__(self, schedule_id, time, direction):
         self.schedule_id = schedule_id
         self.time = time
         self.direction = direction
-        self.std_dev = std_dev
 
     def __str__(self):
         return self.__repr__()
 
     def __repr__(self):
-        return f"TrainArrival(schedule_id={self.schedule_id}, time={self.time}, direction={direction_str(self.direction)}, std_dev={self.std_dev})"
+        return f"TrainArrival(schedule_id={self.schedule_id}, time={self.time}, direction={direction_str(self.direction)})"
 
     @staticmethod
     def sort_by_time(train):
         return train.time      
 
-# TrainWarning is a warning for a train to arrive.
+# TrainWarning is a warning for an arriving/departing train.
 # 
 # should_stop() can be called to determine if the warning can stop being
 # displayed to the user.
@@ -106,65 +68,43 @@ class TrainWarning:
         return time.monotonic() > self._end_monotonic
 
 class TrainPredictorDependencies:
-    def __init__(self, network, datetime, timedelta, nowFcn, mbta_api_key, logger):
+    def __init__(self, network, datetime, timedelta, nowFcn, mbta_api_key, logger, stop_id="place-FB-0275", route_id=None):
         self.network = network 
         self.datetime = datetime 
         self.timedelta = timedelta
         self.nowFcn = nowFcn
         self.mbta_api_key = mbta_api_key
         self.logger = logger
+        self.stop_id = stop_id
+        self.route_id = route_id
 
-# TrainPredictor is a class for predicting when trains will pass by the
-# Children's Museum of Franklin.
+# TrainPredictor is a class for predicting upcoming train arrival and departure times
+# at an MBTA station.
 # 
-# In general the way this works is we query the MBTA API for a schedule of train
-# arrivals at the Franklin MBTA station and also ask it for any more detailed
-# predicted arrival times that it might also have. See DATA_SOURCE . Then apply
-# some offsets to account for the fact that the Children's Museum of Franklin is
-# a minute or so away from the Franklin MBTA station.
-# 
-# It is worth mentioning that the MBTA API best practices page has some nice
-# guidance on how to setup an arrival time board like this:
-# https://www.mbta.com/developers/v3-api/best-practices#predictions under
-# "Countdown Display Rules". I am generally not following these. There are a lot
-# of details in there that don't apply here. For example: "If departure_time is
-# null Do not display this prediction, since riders won’t be able to board the
-# vehicle." But this doesn't apply here since we don't care about if riders can
-# board the train, only if the train will pass by the Children's Museum of
-# Franklin.
-# 
-# At one point in time I considered deciding when to play the train animation
-# warning by setting up a geofence. The https://api-v3.mbta.com/vehicles API
-# will also give us "live" (seems like it updates every 10s or so) data on
-# vehicles such as lat/lon, speed, state enum (stopped, boarding, moving, ...),
-# and so on. But it seems like the /predictions API gives us good enough data so
-# I decided not to go down that path. This vehicle data can also be included in
-# our existing query for schedules by asking it to include "prediction.vehicles"
-# like this:
-# https://api-v3.mbta.com/schedules?filter%5Bstop%5D=place-FB-0275&filter%5Broute%5D=CR-Franklin&sort=arrival_time&include=prediction.vehicles
+# We query the MBTA V3 API for schedules at the configured stop and include real-time
+# predictions. We prefer real-time predictions when available, and fall back to scheduled
+# times for trains further out.
 class TrainPredictor:
-    def __init__(self, dependencies: TrainPredictorDependencies, filterResultsAfterSeconds = 30, trainWarningSeconds = 0, inboundOffsetAverageSeconds=0, inboundOffsetStdDevSeconds=0, outboundOffsetAverageSeconds=0, outboundOffsetStdDevSeconds=0):
+    def __init__(self, dependencies: TrainPredictorDependencies, filterResultsAfterSeconds=30, trainWarningSeconds=0):
         self._network = dependencies.network
         self._datetime = dependencies.datetime
         self._timedelta = dependencies.timedelta
         self._nowFcn = dependencies.nowFcn
         self._logger = dependencies.logger
+        self._stop_id = dependencies.stop_id
+        self._route_id = dependencies.route_id
 
         self._filterResultsAfterSeconds = filterResultsAfterSeconds
         self._trainWarningOffset = self._timedelta(seconds=trainWarningSeconds)
 
-        self._inboundOffsetAverage = self._timedelta(seconds = inboundOffsetAverageSeconds)
-        self._inboundOffsetStdDev = self._timedelta(seconds = inboundOffsetStdDevSeconds)
-        self._outboundOffsetAverage = self._timedelta(seconds = outboundOffsetAverageSeconds)
-        self._outboundOffsetStdDev = self._timedelta(seconds = outboundOffsetStdDevSeconds)
-    
         self._arrived_trains = LimitedSizeOrderedSet(100)
 
-        # Needed to make sure we don't get arrival time messed up when prediction goes away
+        # Cache predictions so that if a train departs before its scheduled time
+        # and its prediction is removed, we don't fall back to displaying the later scheduled time.
         self._train_prediction_cache = LimitedSizeOrderedDict(10)
 
         self._mbta_api_headers = {
-            "accept":  "application/vnd.api+json"
+            "accept": "application/vnd.api+json"
         }
         if dependencies.mbta_api_key is not None:
             self._mbta_api_headers["x-api-key"] = dependencies.mbta_api_key
@@ -172,23 +112,31 @@ class TrainPredictor:
         # The MBTA API responds with a content type header of
         # "application/vnd.api+json". When the matrix portal looks at the
         # response from this API it looks at the content type header to decide
-        # if it can parse te response into JSON. But the matrix portal doesn't
-        # have "application/vnd.api+json" in it's list of default JSON content
+        # if it can parse the response into JSON. But the matrix portal doesn't
+        # have "application/vnd.api+json" in its list of default JSON content
         # types so we need to add that in order for it to correctly recognize
-        # the response as JSON and then parse it. see
-        # https://github.com/adafruit/Adafruit_CircuitPython_PortalBase/blob/d5c51a1838c3aec4d5fbfafb9f09cf62c528d58b/adafruit_portalbase/network.py#L104
+        # the response as JSON.
         if self._network is not None:
             self._network.add_json_content_type("application/vnd.api+json") 
 
-    # next_trains gets the next count trains that are expected to pass by the
-    # Children's Museum of Franklin sorted by expected arrival time. 
-    # 
-    # next_trains will always return a list of length count. If it can not
-    # determine when that many trains will pass by then the elements in the list
-    # will be None.
+    def _get_data_source_url(self):
+        url = (
+            "https://api-v3.mbta.com/schedules?"
+            f"filter[stop]={self._stop_id}&"
+            "sort=arrival_time&"
+            "include=prediction&"
+            "fields[schedule]=arrival_time,departure_time,direction_id&"
+            "fields[prediction]=arrival_time,departure_time,direction_id"
+        )
+        if self._route_id:
+            url += f"&filter[route]={self._route_id}"
+        return url
+
+    # next_trains gets the next count trains sorted by expected time.
+    # Returns a list of length count (padded with None if not enough trains).
     def next_trains(self, count):
         schedule_json = self._fetch_schedules_and_predictions()
-        results =  self._analyze_data(count, schedule_json)
+        results = self._analyze_data(count, schedule_json)
         gc.collect()
         return results
 
@@ -196,63 +144,33 @@ class TrainPredictor:
         if train is None:
             return None
 
-        # Here we compute when we should start showing the warning for this
-        # train.
-        # 
-        # We know that we want to start showing the warning at least
-        # _trainWarningOffset before the train passes by. We also know that
-        # there is some variability in when trains pass by. I did some data
-        # analysis using the MBTA APIs determined a standard deviation of
-        # arrival time. See
-        # https://github.com/anitschke/childrens-museum-franklin-train-board-data-analysis
-        # . Based on all that analysis it seemed reasonable to also start the
-        # warning animation another two standard deviations before to make sure
-        # we give enough time for kids to go watch the train.
-        # 
-        # We want to stop the animation once we know for sure the train has
-        # passed by. So the end time of the warning is the arrival time of the
-        # train plus three standard deviations.
         now = self._nowFcn()
-        warning_start_time = train.time - self._trainWarningOffset -  (2 * train.std_dev)
+        warning_start_time = train.time - self._trainWarningOffset
         if warning_start_time > now:
             return None
-        warning_stop_time = train.time + (3 * train.std_dev)
+        warning_stop_time = train.time
         remaining_seconds = (warning_stop_time - now).total_seconds()
-        now_monatomic = time.monotonic()
-        end_monatomic = now_monatomic + remaining_seconds
+        if remaining_seconds <= 0:
+            return None
+        now_monotonic = time.monotonic()
+        end_monotonic = now_monotonic + remaining_seconds
         
-        return TrainWarning(end_monatomic, train.direction)
+        return TrainWarning(end_monotonic, train.direction)
         
     # mark_train_arrived marks the train as arrived to ensure that it is
-    # correctly filtered out from future next_trains calls and won't show up on
-    # the board after we know it has arrived.
+    # filtered out from future next_trains calls.
     def mark_train_arrived(self, train):
         self._logger.debug(f"marking '{train.schedule_id}' as arrived")
         self._arrived_trains.add(train.schedule_id)
 
-    # We use the MBTA schedule ID for a train arrival ID for simplicity.
-    # But it seems that the MBTA does not make any guarantee about this ID being
-    # globally unique. Best I can tell it is only unique for a given day. It can
-    # and does get reused from day to day. For example on both 2025-11-12 and
-    # 2025-11-13 the 2025-11-12T05:06:00-05:00 inbound train had the ID
-    # "schedule-ReadRailJobConnectionsUpdate-778601-704-FB-0275-S-10". So as
-    # part of the applications nightly tasks it should clear the train
-    # predictor's cache to avoid the ID collision that we know exists. Without
-    # calling clear_cache _arrived_trains will contain the schedule id from the
-    # previous day and incorrectly cause the train predictor to think that the
-    # train has already arrived and not show it on the board.
+    # Schedule IDs can get reused from day to day, so clear caches nightly.
     def clear_cache(self):
         self._arrived_trains.clear()
         self._train_prediction_cache.clear()
 
-
     def _fetch_schedules_and_predictions(self):
-        # When doing data analysis I ran into a few cases where the request to
-        # the MBTA API appeared to stall and time out forever. So we want to
-        # make sure we have a timeout here to make sure the request doesn't
-        # totally stall.
         timeout = 10
-        response = self._network.fetch(DATA_SOURCE, headers=self._mbta_api_headers, timeout=timeout)
+        response = self._network.fetch(self._get_data_source_url(), headers=self._mbta_api_headers, timeout=timeout)
         if response.status_code is not 200:
             raise RuntimeError(f"Failed to fetch data from MBTA API. status_code: {response.status_code} response: {response.text}")
         return response.json()
@@ -266,98 +184,46 @@ class TrainPredictor:
             return None
 
         direction = schedule.get("direction_id")
-        cmf_arrival_time, time_is_from_prediction = self._get_estimated_cmf_arrival_time(schedule, prediction, direction)
-        if cmf_arrival_time is None:
-            self._logger.debug(f"Filtering '{schedule_id}'. arrival not computed")
-            return None
-        
-        # Remove any times more than self._filterResultsAfterSeconds (by default
-        # 5 minutes ago). For the most part trains that have already passed by
-        # should be removed with the _arrived_trains check because we call
-        # mark_train_arrived to mark the train as already arrived, so we really
-        # just need to deal with filtering out old trains from before the board
-        # first starts up.
-        now = self._nowFcn()
-        if (cmf_arrival_time - now).total_seconds() < (-1 * self._filterResultsAfterSeconds):
-            self._logger.debug(f"Filtering '{schedule_id}'. arrival time ({cmf_arrival_time}) is in the past")
+        station_time, time_is_from_prediction = self._get_station_time(schedule, prediction)
+        if station_time is None:
+            self._logger.debug(f"Filtering '{schedule_id}'. station time not computed")
             return None
 
-        std_dev = self._inboundOffsetStdDev if direction == Direction.IN_BOUND else self._outboundOffsetStdDev
-
-        train = TrainArrival(schedule_id, cmf_arrival_time, direction, std_dev)
-
-        # Outbound trains have a prediction time to arrive at the Children's
-        # Museum of Franklin after it leaves the Franklin station. Unfortunately
-        # as we noticed when analyzing data (see
-        # https://github.com/anitschke/childrens-museum-franklin-train-board-data-analysis
-        # ) as soon as a train leaves from a station MBTA removes the
-        # prediction. This could cause issues for us because we still need that
-        # prediction to predict when it will pass by the Children's Museum of
-        # Franklin. If the time offsets are such that we don't start playing the
-        # train warning animation before the train leaves the station the
-        # prediction will go away and we won't have an accurate measure of when
-        # the train is leaving.
-        # 
-        # I think that the Children's Museum of Franklin is close enough that
-        # the time offsets won't ever have this happen. But just to be on the
-        # safe side we will do some caching to prevent it. For a given schedule
-        # we will cache the train arrival object if the train arrival object was
-        # crated using prediction data.
-        # 
-        # Then later if we see that the train arrival data is no logger from a
-        # prediction we will used the cached copy from the prediction if we have
-        # it.
-        if time_is_from_prediction:
-            self._logger.debug(f"Inserting prediction for '{schedule_id}' into cache")
-            self._train_prediction_cache[schedule_id] = train
-        elif schedule_id in self._train_prediction_cache:
-            cached_train = self._train_prediction_cache[schedule_id]
+        # Check prediction cache: if the current data has no prediction (e.g. train already departed
+        # and MBTA dropped the prediction), but we previously cached a prediction for this schedule,
+        # use the cached prediction so we don't revert to a later scheduled time.
+        if not time_is_from_prediction and schedule_id in self._train_prediction_cache:
+            train = self._train_prediction_cache[schedule_id]
             self._logger.debug(f"Using cached prediction for '{schedule_id}'")
-            return cached_train
+        else:
+            train = TrainArrival(schedule_id, station_time, direction)
+            if time_is_from_prediction:
+                self._logger.debug(f"Inserting prediction for '{schedule_id}' into cache")
+                self._train_prediction_cache[schedule_id] = train
+            self._logger.debug(f"Using computed prediction for '{schedule_id}'")
 
-        self._logger.debug(f"Using computed prediction for '{schedule_id}'")
+        # Remove any times more than self._filterResultsAfterSeconds in the past
+        now = self._nowFcn()
+        if (train.time - now).total_seconds() < (-1 * self._filterResultsAfterSeconds):
+            self._logger.debug(f"Filtering '{schedule_id}'. time ({train.time}) is in the past")
+            return None
+
         return train
 
-    def _get_estimated_cmf_arrival_time(self, schedule, prediction, direction):
-        # Prefer using prediction data if possible
+    def _get_station_time(self, schedule, prediction):
+        # Prefer using prediction data if available
         if prediction is not None:
-            result = self._compute_cmf_arrival_time(direction, prediction.get("arrival_time"), prediction.get("departure_time"))
-            if result is not None:
-                return result, True
+            time = self._parse_time(prediction.get("departure_time") or prediction.get("arrival_time"))
+            if time is not None:
+                return time, True
         
         # Fall back to using schedule data
-        return self._compute_cmf_arrival_time(schedule.get("direction_id"), schedule.get("arrival_time"), schedule.get("departure_time")), False
+        return self._parse_time(schedule.get("departure_time") or schedule.get("arrival_time")), False
 
-    def _compute_cmf_arrival_time(self, direction, arrival_time, departure_time):
-        # We are using the Franklin station for our predictions since it is
-        # closest to the Children's Museum of Franklin. The Children's Museum of
-        # Franklin is on the outbound side of the Franklin station. So for
-        # inbound trains we will watch for the arrival time at the Franklin
-        # station since the train will pass by Children's Museum of Franklin
-        # before it gets to the station. For outbound trains we will watch the
-        # departure time from the Franklin station since the train will pass by
-        # the Children's Museum of Franklin after the train departs from the
-        # station.
-        #
-        # If the preferred time is not available we will fall back to using the
-        # other time. This is since we still want to use prediction data over
-        # using schedule or not coming up with an answer at all.
-        #
-        # The values of _inboundOffsetAverage and _outboundOffsetAverage come
-        # from some data analysis that I did recording data from the MBTA API.
-        # See
-        # https://github.com/anitschke/childrens-museum-franklin-train-board-data-analysis
-        # for details.
-
-        station_time_str = (arrival_time or departure_time) if direction == Direction.IN_BOUND else (departure_time or arrival_time)
-        station_time = self._datetime.fromisoformat(station_time_str).replace(tzinfo=None)
-
-        # Since the Children's Museum of Franklin isn't exactly at the Franklin
-        # station we need to apply an offset to station time to give a better
-        # estimate of when the train will pass by Children's Museum of Franklin.
-        offset = self._inboundOffsetAverage if direction == Direction.IN_BOUND else self._outboundOffsetAverage
-        cmf_time = station_time + offset
-        return cmf_time
+    def _parse_time(self, time_str):
+        if not time_str:
+            return None
+        return self._datetime.fromisoformat(time_str).replace(tzinfo=None)
 
     def _analyze_data(self, count, schedule_json):
         trains = []
@@ -367,14 +233,14 @@ class TrainPredictor:
         for item in schedule_json.get("data", []):
 
             # Get prediction if available
-            perdition = None 
+            prediction = None 
             prediction_ref = item.get("relationships", {}).get("prediction", {}).get("data")
             if prediction_ref and prediction_ref.get("id") in included:
-                perdition = included[prediction_ref["id"]]["attributes"]
+                prediction = included[prediction_ref["id"]]["attributes"]
 
             # Compute the train object
             schedule_attrs = item.get("attributes", {})
-            train = self._compute_train(item.get("id"), schedule_attrs, perdition)
+            train = self._compute_train(item.get("id"), schedule_attrs, prediction)
             if train is not None:
                 trains.append(train)
 

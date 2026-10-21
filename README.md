@@ -49,6 +49,8 @@ A `settings.toml` must be created inside this directory containing secrets and A
 * `CIRCUITPY_WEB_API_PORT` and `CIRCUITPY_WEB_API_PASSWORD` may be set to enable access to the board over wifi, this is generally not recommended for security reasons.
 * `ADAFRUIT_AIO_USERNAME` and `ADAFRUIT_AIO_KEY` are required so it can push logs to the adafruit.io log feed and connect to the adafruit.io NTP time server so it can fetch the current time. A free account can be created at io.adafruit.com .
 * `MBTA_API_KEY` a free MBTA API key is required to avoid rate limiting issues and to ensure version compatibility of the API. See https://api-v3.mbta.com/ .  
+* `MBTA_STOP_ID` the stop ID for the MBTA station you want to monitor (e.g. `place-FB-0275` for Franklin / Dean College, `place-sstat` for South Station, `place-davis` for Davis). See [Finding Your MBTA Station ID](#finding-your-mbta-station-id) below.
+* `MBTA_ROUTE_ID` (optional) filter predictions to a specific line/route (e.g. `CR-Franklin` or `Red`).
 
 ```toml
 CIRCUITPY_WIFI_SSID = "REDACTED"
@@ -58,7 +60,23 @@ ADAFRUIT_AIO_USERNAME = "REDACTED"
 ADAFRUIT_AIO_KEY      = "REDACTED"
 
 MBTA_API_KEY = "REDACTED"
+MBTA_STOP_ID = "place-FB-0275"
 ```
+
+#### Finding Your MBTA Station ID
+
+MBTA stations are identified in the MBTA V3 API by parent station stop IDs, which typically begin with `place-`:
+
+1. **Filter by Route in Browser:** You can query the MBTA API directly in a web browser to view all stops on a given line:
+   ```
+   https://api-v3.mbta.com/stops?filter[route]=<ROUTE_ID>
+   ```
+   - Commuter rail route examples: `CR-Franklin`, `CR-Fitchburg`, `CR-Worcester`, `CR-Providence`
+   - Subway route examples: `Red`, `Orange`, `Blue`, `Green-B`, etc.
+   - Example URL for Franklin line stops: https://api-v3.mbta.com/stops?filter[route]=CR-Franklin
+2. **Find the Station ID:** Locate your station's entry in the JSON response under `"data"`. The `"id"` field (such as `"place-FB-0275"` for Franklin / Dean College or `"place-sstat"` for South Station) is your station ID.
+3. **Configure `settings.toml`:** Set `MBTA_STOP_ID = "<YOUR_STOP_ID>"` in your `settings.toml`.
+
 ### Install the program
 
 Run `install.sh` to install all of software and dependencies like the sprite sheet for the animation of the train onto the board.

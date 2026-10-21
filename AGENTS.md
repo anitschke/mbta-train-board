@@ -81,6 +81,7 @@ python3 -m unittest discover -p "*_test.py"
    ADAFRUIT_AIO_USERNAME = "your_aio_username"
    ADAFRUIT_AIO_KEY = "your_aio_key"
    MBTA_API_KEY = "your_mbta_api_key"
+   MBTA_STOP_ID = "place-FB-0275"
    ```
 2. **Install CircuitPython Libraries (First-time or Update):**
    Mount the device (default path: `/run/media/anitschk/CIRCUITPY`) and run:

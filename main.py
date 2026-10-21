@@ -20,14 +20,26 @@ if mbta_api_key is None:
     logger.error("missing MBTA API key")
     raise KeyError("missing MBTA API key")
 
-# inboundOffsetAverageSeconds, inboundOffsetStdDevSeconds,
-# outboundOffsetAverageSeconds, outboundOffsetStdDevSeconds are all used to
-# control how much offset from the arrival time at the franklin MBTA station we
-# need. See "Computing arrival time offsets" in README.md for details.
-train_predictor = TrainPredictor(TrainPredictorDependencies(matrix_portal.network, datetime, timedelta, datetime.now, mbta_api_key, logger), 
+mbta_stop_id = os.getenv("MBTA_STOP_ID")
+if mbta_stop_id is None:
+    logger.error("missing MBTA stop ID")
+    raise KeyError("missing MBTA stop ID")
+
+mbta_route_id = os.getenv("MBTA_ROUTE_ID")
+
+train_predictor = TrainPredictor(
+    TrainPredictorDependencies(
+        matrix_portal.network,
+        datetime,
+        timedelta,
+        datetime.now,
+        mbta_api_key,
+        logger,
+        stop_id=mbta_stop_id,
+        route_id=mbta_route_id,
+    ),
     trainWarningSeconds=60,
-    inboundOffsetAverageSeconds=-63, inboundOffsetStdDevSeconds=9,
-    outboundOffsetAverageSeconds=93, outboundOffsetStdDevSeconds=9)
+)
 
 time_conversion = TimeConversion(TimeConversionDependencies(datetime.now))
 display = Display(DisplayDependencies(matrix_portal, time_conversion, logger), text_scroll_delay=0.1, train_frame_duration=0.08)
