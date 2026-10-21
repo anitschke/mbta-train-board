@@ -1,6 +1,8 @@
-# childrens-museum-franklin-train-board
+# mbta-train-board
 
-The [Children's Museum of Franklin](https://www.childrensmuseumfranklin.org/) has a window overlooking the overlooks the MBTA Franklin commuter rail line. Whenever a train goes by kids will rush over to the window to watch it. This is a project for a train arrival board that shows when the next train will be arriving and plays an animation of a train when it is about to pass by.
+This project is a train arrival and departure board that displays upcoming MBTA commuter rail (or subway) times on an LED matrix display.
+
+This repository is a fork of [childrens-museum-franklin-train-board](https://github.com/anitschke/childrens-museum-franklin-train-board). While the original project was built specifically for the [Children's Museum of Franklin](https://www.childrensmuseumfranklin.org/) to predict when trains would pass by a museum window located between stations, this fork is intended for general use—such as for a family member living close to an MBTA station who wants to see when the T is arriving at or leaving the station near their house. Instead of calculating custom track offsets for a location between stations, this version displays station arrival and departure times directly from the MBTA API for any configured station.
 
 ![train board gif](./train-board.gif)
 
@@ -92,18 +94,21 @@ screen /dev/ttyACM0
 
 ### Implementation complexity
 
-The [Adafruit Matrix Portal library ](https://github.com/adafruit/Adafruit_CircuitPython_MatrixPortal) is setup to make this sort of LED board **very** easy if all you want do to is fetch some data from an API and display it on the board. My first prototype used this much simpler approach that is provided by the library. You just give the library a URL to query and a function to post process the data from that URL and it will pipe that into some text fields and automatically update every few seconds. This implementation can be found way back in the old commit [42d4df9](https://github.com/anitschke/childrens-museum-franklin-train-board/blob/42d4df91104091cb4706397605a01e57b116b2f3/code.py). 
+The [Adafruit Matrix Portal library](https://github.com/adafruit/Adafruit_CircuitPython_MatrixPortal) is setup to make this sort of LED board **very** easy if all you want to do is fetch some data from an API and display it on the board. An early prototype in the original project used this much simpler approach provided by the library: you give the library a URL to query and a function to post-process the data, and it pipes that into text fields and automatically updates. That implementation can be found in the old commit [42d4df9](https://github.com/anitschke/childrens-museum-franklin-train-board/blob/42d4df91104091cb4706397605a01e57b116b2f3/code.py). 
 
-The final implementation of this board ended up being a lot more complicated than this first prototype few reasons:
-* The board is intended to be at a children's museum where a lot of kids are young and haven't learned how to read yet. So I wanted some sort of animation that small kids would be able to use too. The library didn't seem to have a good way to build this sort of need to play an animation into its text update cycle.
-* The MBTA API doesn't have a way to query for an estimated arrival time any arbitrary location on the track, only for estimated arrival times a stations. Since the Children's Museum of Franklin a few minutes down the track from the Franklin station I needed to apply a offset to the time provided by the MBTA API. This gets a little complicated and I wanted to be able to add unit tests for this logic. So I split it off into its own separate file/class.
+The implementation in this repository is more structured than that first prototype for a couple of reasons:
+* It includes an animated train sprite and scrolling text, which did not fit cleanly into the library's default text update loop.
+* It uses dependency injection and modular components so the prediction and display logic can be unit-tested under standard CPython without hardware libraries.
 
-If you are going to make a board like this I would recommend you first go with the easy approach in commit 
-[42d4df9](https://github.com/anitschke/childrens-museum-franklin-train-board/blob/42d4df91104091cb4706397605a01e57b116b2f3/code.py) and only move on to something more complicated like this if you need extra functionality.
+In the original children's museum project, additional complexity was also needed to calculate custom arrival time offsets for trains passing by a track location between stations. For this board, that offset complexity does not apply because we can directly trust the MBTA API's station arrival and departure times.
+
+If you are building a basic board from scratch and only need simple periodic text updates, starting with the simpler approach in commit [42d4df9](https://github.com/anitschke/childrens-museum-franklin-train-board/blob/42d4df91104091cb4706397605a01e57b116b2f3/code.py) is a great baseline.
 
 ### Computing arrival time offsets
 
-The MBTA API doesn't have a way to query for an estimated arrival time any arbitrary location on the track, only for estimated arrival times a stations. Since the Children's Museum of Franklin a few minutes down the track from the Franklin station I needed to apply a offset to the time provided by the MBTA API. To figure out what offset to apply to the time provided by the MBTA API I recorded a predicted times vs when the train passed by the Children's Museum of Franklin. This analysis can be found in this GitHub Repo: https://github.com/anitschke/childrens-museum-franklin-train-board-data-analysis .
+In the upstream [childrens-museum-franklin-train-board](https://github.com/anitschke/childrens-museum-franklin-train-board) project, the MBTA API could not directly provide arrival times for the museum because the museum was located down the track from Franklin station rather than at a station. That required recording empirical passing times versus predicted times and calculating time offsets (see the [historical data analysis repo](https://github.com/anitschke/childrens-museum-franklin-train-board-data-analysis)).
+
+For this board, computing arrival time offsets is not necessary: because the display is intended for seeing when trains arrive at or leave a station, we can directly trust and display the MBTA V3 API's arrival and departure predictions for the station.
 
 ### Train sprite
 
